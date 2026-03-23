@@ -78,22 +78,15 @@ class SDXL_VAE_TENSORRT_LOADER_DECODER:
         trt_vae = TrtVaeDecoder(vae_path)
         import comfy.sd
         new_vae = comfy.sd.VAE(sd={})
-        class FirstStageModelWrapper:
+        class FirstStageModelWrapper(torch.nn.Module):
             def __init__(self, trt_vae):
+                super().__init__()
                 self.trt_vae = trt_vae
                 self.device = comfy.model_management.get_torch_device()
             def decode(self, z):
                 return self.trt_vae.decode(z)
             def encode(self, x):
                 return None
-            def to(self, *args, **kwargs):
-                return self
-            def eval(self):
-                return self
-            def load_state_dict(self, sd, strict=False):
-                pass
-            def state_dict(self):
-                return {}
         new_vae.first_stage_model = FirstStageModelWrapper(trt_vae)
         new_vae.device = comfy.model_management.vae_device()
         new_vae.vae_dtype = comfy.model_management.vae_dtype(new_vae.device, [torch.float16, torch.float32])
