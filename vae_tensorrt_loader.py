@@ -66,7 +66,7 @@ class SDXL_VAE_TENSORRT_LOADER:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {"vae_name": (folder_paths.get_filename_list("tensorrt"), ),
-                             "vae": ("VAE", )}}
+                             }}
     RETURN_TYPES = ("VAE",)
     FUNCTION = "load_vae"
     CATEGORY = "TensorRT"
