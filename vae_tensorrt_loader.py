@@ -90,6 +90,10 @@ class SDXL_VAE_TENSORRT_LOADER_DECODER:
                 return self
             def eval(self):
                 return self
+            def load_state_dict(self, sd, strict=False):
+                pass
+            def state_dict(self):
+                return {}
         new_vae.first_stage_model = FirstStageModelWrapper(trt_vae)
         new_vae.device = comfy.model_management.vae_device()
         new_vae.vae_dtype = comfy.model_management.vae_dtype(new_vae.device, [torch.float16, torch.float32])
