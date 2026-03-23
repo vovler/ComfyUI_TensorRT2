@@ -62,7 +62,7 @@ class TrtVaeDecoder:
             self.context.execute_async_v3(stream_handle=stream.cuda_stream)
         return out
 
-class SDXL_VAE_TENSORRT_LOADER:
+class SDXL_VAE_TENSORRT_LOADER_DECODER:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {"vae_name": (folder_paths.get_filename_list("tensorrt"), ),
@@ -71,25 +71,24 @@ class SDXL_VAE_TENSORRT_LOADER:
     FUNCTION = "load_vae"
     CATEGORY = "TensorRT"
 
-    def load_vae(self, vae_name, vae):
+    def load_vae(self, vae_name):
         vae_path = folder_paths.get_full_path("tensorrt", vae_name)
         if not vae_path or not os.path.isfile(vae_path):
             raise FileNotFoundError(f"File {vae_name} does not exist")
         trt_vae = TrtVaeDecoder(vae_path)
-        import copy
-        new_vae = copy.copy(vae)
+        import comfy.sd
+        new_vae = comfy.sd.VAE(sd={})
         class FirstStageModelWrapper:
-            def __init__(self, original_first_stage, trt_vae):
-                self.original = original_first_stage
+            def __init__(self, trt_vae):
                 self.trt_vae = trt_vae
-                self.device = original_first_stage.device if hasattr(original_first_stage, 'device') else comfy.model_management.get_torch_device()
+                self.device = comfy.model_management.get_torch_device()
             def decode(self, z):
                 return self.trt_vae.decode(z)
             def encode(self, x):
-                return self.original.encode(x)
-        new_vae.first_stage_model = FirstStageModelWrapper(vae.first_stage_model, trt_vae)
+                return None
+        new_vae.first_stage_model = FirstStageModelWrapper(trt_vae)
         return (new_vae,)
 
 NODE_CLASS_MAPPINGS = {
-    "SDXL_VAE_TENSORRT_LOADER": SDXL_VAE_TENSORRT_LOADER,
+    "SDXL_VAE_TENSORRT_LOADER_DECODER": SDXL_VAE_TENSORRT_LOADER_DECODER,
 }
