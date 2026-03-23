@@ -8,6 +8,8 @@ class TrtVaeDecoder:
     def __init__(self, engine_path):
         with open(engine_path, "rb") as f:
             self.engine = runtime.deserialize_cuda_engine(f.read())
+        if self.engine is None:
+            raise RuntimeError(f"Failed to deserialize TensorRT engine: {engine_path}. The engine might be incompatible with the current hardware or TensorRT version.")
         self.context = self.engine.create_execution_context()
 
     def set_bindings_shape(self, inputs, split_batch):

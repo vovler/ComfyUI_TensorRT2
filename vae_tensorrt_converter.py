@@ -4,11 +4,36 @@ import time
 import comfy.model_management
 import tensorrt as trt
 import folder_paths
-from .trt_common import TRT_MODEL_CONVERSION_BASE, logger, TQDMProgressMonitor
+from .trt_common import logger, TQDMProgressMonitor
 
-class SDXL_VAE_TENSORRT_CONVERTER(TRT_MODEL_CONVERSION_BASE):
+class SDXL_VAE_TENSORRT_CONVERTER:
     def __init__(self):
-        super(SDXL_VAE_TENSORRT_CONVERTER, self).__init__()
+        self.output_dir = os.path.join(folder_paths.models_dir, "tensorrt")
+        self.temp_dir = folder_paths.get_temp_directory()
+        self.timing_cache_path = os.path.normpath(
+            os.path.join(os.path.join(os.path.dirname(os.path.realpath(__file__)), "timing_cache.trt"))
+        )
+
+    RETURN_TYPES = ()
+    FUNCTION = "convert"
+    OUTPUT_NODE = True
+    CATEGORY = "TensorRT"
+
+    def _setup_timing_cache(self, config: trt.IBuilderConfig):
+        buffer = b""
+        if os.path.exists(self.timing_cache_path):
+            with open(self.timing_cache_path, mode="rb") as timing_cache_file:
+                buffer = timing_cache_file.read()
+            print("Read {} bytes from timing cache.".format(len(buffer)))
+        else:
+            print("No timing cache found; Initializing a new one.")
+        timing_cache: trt.ITimingCache = config.create_timing_cache(buffer)
+        config.set_timing_cache(timing_cache, ignore_mismatch=True)
+
+    def _save_timing_cache(self, config: trt.IBuilderConfig):
+        timing_cache: trt.ITimingCache = config.get_timing_cache()
+        with open(self.timing_cache_path, "wb") as timing_cache_file:
+            timing_cache_file.write(memoryview(timing_cache.serialize()))
 
     @classmethod
     def INPUT_TYPES(cls):
