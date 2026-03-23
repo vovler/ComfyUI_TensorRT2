@@ -86,7 +86,16 @@ class SDXL_VAE_TENSORRT_LOADER_DECODER:
                 return self.trt_vae.decode(z)
             def encode(self, x):
                 return None
+            def to(self, *args, **kwargs):
+                return self
+            def eval(self):
+                return self
         new_vae.first_stage_model = FirstStageModelWrapper(trt_vae)
+        new_vae.device = comfy.model_management.vae_device()
+        new_vae.vae_dtype = comfy.model_management.vae_dtype(new_vae.device, [torch.float16, torch.float32])
+        new_vae.output_device = comfy.model_management.intermediate_device()
+        import comfy.model_patcher
+        new_vae.patcher = comfy.model_patcher.ModelPatcher(new_vae.first_stage_model, load_device=new_vae.device, offload_device=comfy.model_management.vae_offload_device())
         return (new_vae,)
 
 NODE_CLASS_MAPPINGS = {
