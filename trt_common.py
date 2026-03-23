@@ -1,17 +1,13 @@
 import torch
-import sys
 import os
+import sys
 import time
-import comfy.model_management
-
 import tensorrt as trt
 import folder_paths
 from tqdm import tqdm
+import comfy.model_management
 
-# TODO:
-# Make it more generic: less model specific code
-
-# add output directory to tensorrt search path
+# Setup folder paths
 if "tensorrt" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["tensorrt"] = (
         [os.path.join(folder_paths.models_dir, "tensorrt")],
@@ -21,6 +17,22 @@ else:
     if os.path.join(folder_paths.models_dir, "tensorrt") not in folder_paths.folder_names_and_paths["tensorrt"][0]:
         folder_paths.folder_names_and_paths["tensorrt"][0].append(os.path.join(folder_paths.models_dir, "tensorrt"))
     folder_paths.folder_names_and_paths["tensorrt"][1].add(".engine")
+
+# Init TRT
+trt.init_libnvinfer_plugins(None, "")
+logger = trt.Logger(trt.Logger.INFO)
+runtime = trt.Runtime(logger)
+
+def trt_datatype_to_torch(datatype):
+    if datatype == trt.float16:
+        return torch.float16
+    elif datatype == trt.float32:
+        return torch.float32
+    elif datatype == trt.int32:
+        return torch.int32
+    elif datatype == trt.bfloat16:
+        return torch.bfloat16
+    return torch.float32
 
 class TQDMProgressMonitor(trt.IProgressMonitor):
     def __init__(self):
@@ -52,8 +64,7 @@ class TQDMProgressMonitor(trt.IProgressMonitor):
                 "parent_phase": parent_phase,
             }
         except KeyboardInterrupt:
-            # The phase_start callback cannot directly cancel the build, so request the cancellation from within step_complete.
-            _step_result = False
+            self._step_result = False
 
     def phase_finish(self, phase_name):
         try:
@@ -62,7 +73,6 @@ class TQDMProgressMonitor(trt.IProgressMonitor):
                     self._active_phases[phase_name]["tq"].total
                     - self._active_phases[phase_name]["tq"].n
                 )
-
                 parent_phase = self._active_phases[phase_name].get("parent_phase", None)
                 while parent_phase is not None:
                     self._active_phases[parent_phase]["tq"].refresh()
@@ -77,9 +87,8 @@ class TQDMProgressMonitor(trt.IProgressMonitor):
                         self._active_phases[phase_name]["parent_phase"]
                     ]["tq"].refresh()
                 del self._active_phases[phase_name]
-            pass
         except KeyboardInterrupt:
-            _step_result = False
+            self._step_result = False
 
     def step_complete(self, phase_name, step):
         try:
@@ -89,9 +98,7 @@ class TQDMProgressMonitor(trt.IProgressMonitor):
                 )
             return self._step_result
         except KeyboardInterrupt:
-            # There is no need to propagate this exception to TensorRT. We can simply cancel the build.
             return False
-        
 
 class TRT_MODEL_CONVERSION_BASE:
     def __init__(self):
@@ -106,11 +113,6 @@ class TRT_MODEL_CONVERSION_BASE:
     OUTPUT_NODE = True
     CATEGORY = "TensorRT"
 
-    @classmethod
-    def INPUT_TYPES(s):
-        raise NotImplementedError
-
-    # Sets up the builder to use the timing cache file, and creates it if it does not already exist
     def _setup_timing_cache(self, config: trt.IBuilderConfig):
         buffer = b""
         if os.path.exists(self.timing_cache_path):
@@ -122,7 +124,6 @@ class TRT_MODEL_CONVERSION_BASE:
         timing_cache: trt.ITimingCache = config.create_timing_cache(buffer)
         config.set_timing_cache(timing_cache, ignore_mismatch=True)
 
-    # Saves the config's timing cache to file
     def _save_timing_cache(self, config: trt.IBuilderConfig):
         timing_cache: trt.ITimingCache = config.get_timing_cache()
         with open(self.timing_cache_path, "wb") as timing_cache_file:
@@ -174,17 +175,18 @@ class TRT_MODEL_CONVERSION_BASE:
 
             transformer_options = model.model_options['transformer_options'].copy()
             class UNET(torch.nn.Module):
+                def __init__(self, unet, transformer_options, extra_input_names):
+                    super().__init__()
+                    self.unet = unet
+                    self.transformer_options = transformer_options
+                    self.extra_input_names = extra_input_names
                 def forward(self, x, timesteps, context, *args):
-                    extras = input_names[3:]
                     extra_args = {}
-                    for i in range(len(extras)):
-                        extra_args[extras[i]] = args[i]
+                    for i in range(len(self.extra_input_names)):
+                        extra_args[self.extra_input_names[i]] = args[i]
                     return self.unet(x, timesteps, context, transformer_options=self.transformer_options, **extra_args)
 
-            _unet = UNET()
-            _unet.unet = unet
-            _unet.transformer_options = transformer_options
-            unet = _unet
+            unet_wrapped = UNET(unet, transformer_options, input_names[3:])
 
             input_channels = model.model.model_config.unet_config.get("in_channels", 4)
 
@@ -235,7 +237,7 @@ class TRT_MODEL_CONVERSION_BASE:
 
         os.makedirs(os.path.dirname(output_onnx), exist_ok=True)
         torch.onnx.export(
-            unet,
+            unet_wrapped,
             inputs,
             output_onnx,
             verbose=False,
@@ -249,9 +251,7 @@ class TRT_MODEL_CONVERSION_BASE:
         comfy.model_management.soft_empty_cache()
 
         # TRT conversion starts here
-        logger = trt.Logger(trt.Logger.INFO)
         builder = trt.Builder(logger)
-
         network = builder.create_network(
             1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
         )
@@ -269,18 +269,8 @@ class TRT_MODEL_CONVERSION_BASE:
         self._setup_timing_cache(config)
         config.progress_monitor = TQDMProgressMonitor()
 
-        prefix_encode = ""
         for k in range(len(input_names)):
-            min_shape = inputs_shapes_min[k]
-            opt_shape = inputs_shapes_opt[k]
-            max_shape = inputs_shapes_max[k]
-            profile.set_shape(input_names[k], min_shape, opt_shape, max_shape)
-
-            # Encode shapes to filename
-            encode = lambda a: ".".join(map(lambda x: str(x), a))
-            prefix_encode += "{}#{}#{}#{};".format(
-                input_names[k], encode(min_shape), encode(opt_shape), encode(max_shape)
-            )
+            profile.set_shape(input_names[k], inputs_shapes_min[k], inputs_shapes_opt[k], inputs_shapes_max[k])
 
         if dtype == torch.float16:
             config.set_flag(trt.BuilderFlag.FP16)
@@ -289,7 +279,6 @@ class TRT_MODEL_CONVERSION_BASE:
 
         config.add_optimization_profile(profile)
 
-        
         filename_prefix = "{}_${}".format(
             filename_prefix,
             "-".join(
@@ -326,164 +315,3 @@ class TRT_MODEL_CONVERSION_BASE:
         self._save_timing_cache(config)
 
         return ()
-
-
-class SDXL_TENSORRT_CONVERTER(TRT_MODEL_CONVERSION_BASE):
-    def __init__(self):
-        super(SDXL_TENSORRT_CONVERTER, self).__init__()
-
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "model": ("MODEL",),
-                "filename_prefix": ("STRING", {"default": "ComfyUI_SDXL"}),
-                "batch_size_min": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 100,
-                        "step": 1,
-                    },
-                ),
-                "batch_size_opt": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 100,
-                        "step": 1,
-                    },
-                ),
-                "batch_size_max": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 100,
-                        "step": 1,
-                    },
-                ),
-                "height_min": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 256,
-                        "max": 4096,
-                        "step": 64,
-                    },
-                ),
-                "height_opt": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 256,
-                        "max": 4096,
-                        "step": 64,
-                    },
-                ),
-                "height_max": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 256,
-                        "max": 4096,
-                        "step": 64,
-                    },
-                ),
-                "width_min": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 256,
-                        "max": 4096,
-                        "step": 64,
-                    },
-                ),
-                "width_opt": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 256,
-                        "max": 4096,
-                        "step": 64,
-                    },
-                ),
-                "width_max": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 256,
-                        "max": 4096,
-                        "step": 64,
-                    },
-                ),
-                "context_min": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 128,
-                        "step": 1,
-                    },
-                ),
-                "context_opt": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 128,
-                        "step": 1,
-                    },
-                ),
-                "context_max": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 128,
-                        "step": 1,
-                    },
-                ),
-            },
-        }
-
-    def convert(
-        self,
-        model,
-        filename_prefix,
-        batch_size_min,
-        batch_size_opt,
-        batch_size_max,
-        height_min,
-        height_opt,
-        height_max,
-        width_min,
-        width_opt,
-        width_max,
-        context_min,
-        context_opt,
-        context_max,
-    ):
-        return super()._convert(
-            model,
-            filename_prefix,
-            batch_size_min,
-            batch_size_opt,
-            batch_size_max,
-            height_min,
-            height_opt,
-            height_max,
-            width_min,
-            width_opt,
-            width_max,
-            context_min,
-            context_opt,
-            context_max,
-        )
-
-
-NODE_CLASS_MAPPINGS = {
-    "SDXL_TENSORRT_CONVERTER": SDXL_TENSORRT_CONVERTER,
-}
