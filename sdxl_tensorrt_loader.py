@@ -9,13 +9,15 @@ import comfy.model_patcher
 import comfy.supported_models
 import folder_paths
 
-if "tensorrt" in folder_paths.folder_names_and_paths:
-    folder_paths.folder_names_and_paths["tensorrt"][0].append(
-        os.path.join(folder_paths.models_dir, "tensorrt"))
-    folder_paths.folder_names_and_paths["tensorrt"][1].add(".engine")
-else:
+if "tensorrt" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["tensorrt"] = (
-        [os.path.join(folder_paths.models_dir, "tensorrt")], {".engine"})
+        [os.path.join(folder_paths.models_dir, "tensorrt")],
+        {".engine"},
+    )
+else:
+    if os.path.join(folder_paths.models_dir, "tensorrt") not in folder_paths.folder_names_and_paths["tensorrt"][0]:
+        folder_paths.folder_names_and_paths["tensorrt"][0].append(os.path.join(folder_paths.models_dir, "tensorrt"))
+    folder_paths.folder_names_and_paths["tensorrt"][1].add(".engine")
 
 import tensorrt as trt
 
@@ -110,11 +112,11 @@ class TrTUnet:
         return {}
 
 
-class TensorRTLoader:
+class SDXL_TENSORRT_LOADER:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"unet_name": (folder_paths.get_filename_list("tensorrt"), ),
-                             "model_type": (["sdxl_base", "sdxl_refiner", "sd1.x", "sd2.x-768v", "svd", "sd3", "auraflow", "flux_dev", "flux_schnell"], ),
+                             "model_type": (["sdxl_base"], ),
                              }}
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load_unet"
@@ -129,41 +131,8 @@ class TensorRTLoader:
             conf = comfy.supported_models.SDXL({"adm_in_channels": 2816})
             conf.unet_config["disable_unet_model_creation"] = True
             model = comfy.model_base.SDXL(conf)
-        elif model_type == "sdxl_refiner":
-            conf = comfy.supported_models.SDXLRefiner(
-                {"adm_in_channels": 2560})
-            conf.unet_config["disable_unet_model_creation"] = True
-            model = comfy.model_base.SDXLRefiner(conf)
-        elif model_type == "sd1.x":
-            conf = comfy.supported_models.SD15({})
-            conf.unet_config["disable_unet_model_creation"] = True
-            model = comfy.model_base.BaseModel(conf)
-        elif model_type == "sd2.x-768v":
-            conf = comfy.supported_models.SD20({})
-            conf.unet_config["disable_unet_model_creation"] = True
-            model = comfy.model_base.BaseModel(conf, model_type=comfy.model_base.ModelType.V_PREDICTION)
-        elif model_type == "svd":
-            conf = comfy.supported_models.SVD_img2vid({})
-            conf.unet_config["disable_unet_model_creation"] = True
-            model = conf.get_model({})
-        elif model_type == "sd3":
-            conf = comfy.supported_models.SD3({})
-            conf.unet_config["disable_unet_model_creation"] = True
-            model = conf.get_model({})
-        elif model_type == "auraflow":
-            conf = comfy.supported_models.AuraFlow({})
-            conf.unet_config["disable_unet_model_creation"] = True
-            model = conf.get_model({})
-        elif model_type == "flux_dev":
-            conf = comfy.supported_models.Flux({})
-            conf.unet_config["disable_unet_model_creation"] = True
-            model = conf.get_model({})
-            unet.dtype = torch.bfloat16 #TODO: autodetect
-        elif model_type == "flux_schnell":
-            conf = comfy.supported_models.FluxSchnell({})
-            conf.unet_config["disable_unet_model_creation"] = True
-            model = conf.get_model({})
-            unet.dtype = torch.bfloat16 #TODO: autodetect
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}")
         model.diffusion_model = unet
         model.memory_required = lambda *args, **kwargs: 0 #always pass inputs batched up as much as possible, our TRT code will handle batch splitting
 
@@ -172,5 +141,5 @@ class TensorRTLoader:
                                                  offload_device=comfy.model_management.unet_offload_device()),)
 
 NODE_CLASS_MAPPINGS = {
-    "TensorRTLoader": TensorRTLoader,
+    "SDXL_TENSORRT_LOADER": SDXL_TENSORRT_LOADER,
 }

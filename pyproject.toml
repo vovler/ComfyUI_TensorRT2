@@ -4,9 +4,9 @@ description = "TensorRT Node for ComfyUI\nThis node enables the best performance
 version = "0.0.1"
 license = "LICENSE"
 dependencies = [
-  "tensorrt=10.13.0.35",
-  "tensorrt-cu12=10.13.0.35",
-  "tensorrt-stubs=10.13.0.35.1",
+  "tensorrt==10.13.0.35",
+  "tensorrt-cu12==10.13.0.35",
+  "tensorrt-stubs==10.13.0.35.1",
   "onnx==1.20.1",
   "onnxruntime-gpu>=1.24.4",
   "psutil"

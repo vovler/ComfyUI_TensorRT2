@@ -12,16 +12,15 @@ from tqdm import tqdm
 # Make it more generic: less model specific code
 
 # add output directory to tensorrt search path
-if "tensorrt" in folder_paths.folder_names_and_paths:
-    folder_paths.folder_names_and_paths["tensorrt"][0].append(
-        os.path.join(folder_paths.get_output_directory(), "tensorrt")
-    )
-    folder_paths.folder_names_and_paths["tensorrt"][1].add(".engine")
-else:
+if "tensorrt" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["tensorrt"] = (
-        [os.path.join(folder_paths.get_output_directory(), "tensorrt")],
+        [os.path.join(folder_paths.models_dir, "tensorrt")],
         {".engine"},
     )
+else:
+    if os.path.join(folder_paths.models_dir, "tensorrt") not in folder_paths.folder_names_and_paths["tensorrt"][0]:
+        folder_paths.folder_names_and_paths["tensorrt"][0].append(os.path.join(folder_paths.models_dir, "tensorrt"))
+    folder_paths.folder_names_and_paths["tensorrt"][1].add(".engine")
 
 class TQDMProgressMonitor(trt.IProgressMonitor):
     def __init__(self):
@@ -96,7 +95,7 @@ class TQDMProgressMonitor(trt.IProgressMonitor):
 
 class TRT_MODEL_CONVERSION_BASE:
     def __init__(self):
-        self.output_dir = folder_paths.get_output_directory()
+        self.output_dir = os.path.join(folder_paths.models_dir, "tensorrt")
         self.temp_dir = folder_paths.get_temp_directory()
         self.timing_cache_path = os.path.normpath(
             os.path.join(os.path.join(os.path.dirname(os.path.realpath(__file__)), "timing_cache.trt"))
@@ -145,8 +144,6 @@ class TRT_MODEL_CONVERSION_BASE:
         context_min,
         context_opt,
         context_max,
-        num_video_frames,
-        is_static: bool,
     ):
         output_onnx = os.path.normpath(
             os.path.join(
@@ -165,23 +162,6 @@ class TRT_MODEL_CONVERSION_BASE:
         extra_input = {}
         dtype = torch.float16
 
-        if isinstance(model.model, comfy.model_base.SD3): #SD3
-            context_embedder_config = model.model.model_config.unet_config.get("context_embedder_config", None)
-            if context_embedder_config is not None:
-                context_dim = context_embedder_config.get("params", {}).get("in_features", None)
-                context_len = 154 #NOTE: SD3 can have 77 or 154 depending on which text encoders are used, this is why context_len_min stays 77
-        elif isinstance(model.model, comfy.model_base.AuraFlow):
-            context_dim = 2048
-            context_len_min = 256
-            context_len = 256
-        elif isinstance(model.model, comfy.model_base.Flux):
-            context_dim = model.model.model_config.unet_config.get("context_in_dim", None)
-            context_len_min = 256
-            context_len = 256
-            y_dim = model.model.model_config.unet_config.get("vec_in_dim", None)
-            extra_input = {"guidance": ()}
-            dtype = torch.bfloat16
-
         if context_dim is not None:
             input_names = ["x", "timesteps", "context"]
             output_names = ["h"]
@@ -193,43 +173,18 @@ class TRT_MODEL_CONVERSION_BASE:
             }
 
             transformer_options = model.model_options['transformer_options'].copy()
-            if model.model.model_config.unet_config.get(
-                "use_temporal_resblock", False
-            ):  # SVD
-                batch_size_min = num_video_frames * batch_size_min
-                batch_size_opt = num_video_frames * batch_size_opt
-                batch_size_max = num_video_frames * batch_size_max
+            class UNET(torch.nn.Module):
+                def forward(self, x, timesteps, context, *args):
+                    extras = input_names[3:]
+                    extra_args = {}
+                    for i in range(len(extras)):
+                        extra_args[extras[i]] = args[i]
+                    return self.unet(x, timesteps, context, transformer_options=self.transformer_options, **extra_args)
 
-                class UNET(torch.nn.Module):
-                    def forward(self, x, timesteps, context, y):
-                        return self.unet(
-                            x,
-                            timesteps,
-                            context,
-                            y,
-                            num_video_frames=self.num_video_frames,
-                            transformer_options=self.transformer_options,
-                        )
-
-                svd_unet = UNET()
-                svd_unet.num_video_frames = num_video_frames
-                svd_unet.unet = unet
-                svd_unet.transformer_options = transformer_options
-                unet = svd_unet
-                context_len_min = context_len = 1
-            else:
-                class UNET(torch.nn.Module):
-                    def forward(self, x, timesteps, context, *args):
-                        extras = input_names[3:]
-                        extra_args = {}
-                        for i in range(len(extras)):
-                            extra_args[extras[i]] = args[i]
-                        return self.unet(x, timesteps, context, transformer_options=self.transformer_options, **extra_args)
-
-                _unet = UNET()
-                _unet.unet = unet
-                _unet.transformer_options = transformer_options
-                unet = _unet
+            _unet = UNET()
+            _unet.unet = unet
+            _unet.transformer_options = transformer_options
+            unet = _unet
 
             input_channels = model.model.model_config.unet_config.get("in_channels", 4)
 
@@ -334,42 +289,27 @@ class TRT_MODEL_CONVERSION_BASE:
 
         config.add_optimization_profile(profile)
 
-        if is_static:
-            filename_prefix = "{}_${}".format(
-                filename_prefix,
-                "-".join(
-                    (
-                        "stat",
-                        "b",
-                        str(batch_size_opt),
-                        "h",
-                        str(height_opt),
-                        "w",
-                        str(width_opt),
-                    )
-                ),
-            )
-        else:
-            filename_prefix = "{}_${}".format(
-                filename_prefix,
-                "-".join(
-                    (
-                        "dyn",
-                        "b",
-                        str(batch_size_min),
-                        str(batch_size_max),
-                        str(batch_size_opt),
-                        "h",
-                        str(height_min),
-                        str(height_max),
-                        str(height_opt),
-                        "w",
-                        str(width_min),
-                        str(width_max),
-                        str(width_opt),
-                    )
-                ),
-            )
+        
+        filename_prefix = "{}_${}".format(
+            filename_prefix,
+            "-".join(
+                (
+                    "dyn",
+                    "b",
+                    str(batch_size_min),
+                    str(batch_size_max),
+                    str(batch_size_opt),
+                    "h",
+                    str(height_min),
+                    str(height_max),
+                    str(height_opt),
+                    "w",
+                    str(width_min),
+                    str(width_max),
+                    str(width_opt),
+                )
+            ),
+        )
 
         serialized_engine = builder.build_serialized_network(network, config)
 
@@ -388,16 +328,16 @@ class TRT_MODEL_CONVERSION_BASE:
         return ()
 
 
-class DYNAMIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
+class SDXL_TENSORRT_CONVERTER(TRT_MODEL_CONVERSION_BASE):
     def __init__(self):
-        super(DYNAMIC_TRT_MODEL_CONVERSION, self).__init__()
+        super(SDXL_TENSORRT_CONVERTER, self).__init__()
 
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "model": ("MODEL",),
-                "filename_prefix": ("STRING", {"default": "tensorrt/ComfyUI_DYN"}),
+                "filename_prefix": ("STRING", {"default": "ComfyUI_SDXL"}),
                 "batch_size_min": (
                     "INT",
                     {
@@ -428,7 +368,7 @@ class DYNAMIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
                 "height_min": (
                     "INT",
                     {
-                        "default": 512,
+                        "default": 1024,
                         "min": 256,
                         "max": 4096,
                         "step": 64,
@@ -437,7 +377,7 @@ class DYNAMIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
                 "height_opt": (
                     "INT",
                     {
-                        "default": 512,
+                        "default": 1024,
                         "min": 256,
                         "max": 4096,
                         "step": 64,
@@ -446,7 +386,7 @@ class DYNAMIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
                 "height_max": (
                     "INT",
                     {
-                        "default": 512,
+                        "default": 1024,
                         "min": 256,
                         "max": 4096,
                         "step": 64,
@@ -455,7 +395,7 @@ class DYNAMIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
                 "width_min": (
                     "INT",
                     {
-                        "default": 512,
+                        "default": 1024,
                         "min": 256,
                         "max": 4096,
                         "step": 64,
@@ -464,7 +404,7 @@ class DYNAMIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
                 "width_opt": (
                     "INT",
                     {
-                        "default": 512,
+                        "default": 1024,
                         "min": 256,
                         "max": 4096,
                         "step": 64,
@@ -473,7 +413,7 @@ class DYNAMIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
                 "width_max": (
                     "INT",
                     {
-                        "default": 512,
+                        "default": 1024,
                         "min": 256,
                         "max": 4096,
                         "step": 64,
@@ -506,15 +446,6 @@ class DYNAMIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
                         "step": 1,
                     },
                 ),
-                "num_video_frames": (
-                    "INT",
-                    {
-                        "default": 14,
-                        "min": 0,
-                        "max": 1000,
-                        "step": 1,
-                    },
-                ),
             },
         }
 
@@ -534,7 +465,6 @@ class DYNAMIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
         context_min,
         context_opt,
         context_max,
-        num_video_frames,
     ):
         return super()._convert(
             model,
@@ -551,100 +481,9 @@ class DYNAMIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
             context_min,
             context_opt,
             context_max,
-            num_video_frames,
-            is_static=False,
-        )
-
-
-class STATIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
-    def __init__(self):
-        super(STATIC_TRT_MODEL_CONVERSION, self).__init__()
-
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "model": ("MODEL",),
-                "filename_prefix": ("STRING", {"default": "tensorrt/ComfyUI_STAT"}),
-                "batch_size_opt": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 100,
-                        "step": 1,
-                    },
-                ),
-                "height_opt": (
-                    "INT",
-                    {
-                        "default": 512,
-                        "min": 256,
-                        "max": 4096,
-                        "step": 64,
-                    },
-                ),
-                "width_opt": (
-                    "INT",
-                    {
-                        "default": 512,
-                        "min": 256,
-                        "max": 4096,
-                        "step": 64,
-                    },
-                ),
-                "context_opt": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 128,
-                        "step": 1,
-                    },
-                ),
-                "num_video_frames": (
-                    "INT",
-                    {
-                        "default": 14,
-                        "min": 0,
-                        "max": 1000,
-                        "step": 1,
-                    },
-                ),
-            },
-        }
-
-    def convert(
-        self,
-        model,
-        filename_prefix,
-        batch_size_opt,
-        height_opt,
-        width_opt,
-        context_opt,
-        num_video_frames,
-    ):
-        return super()._convert(
-            model,
-            filename_prefix,
-            batch_size_opt,
-            batch_size_opt,
-            batch_size_opt,
-            height_opt,
-            height_opt,
-            height_opt,
-            width_opt,
-            width_opt,
-            width_opt,
-            context_opt,
-            context_opt,
-            context_opt,
-            num_video_frames,
-            is_static=True,
         )
 
 
 NODE_CLASS_MAPPINGS = {
-    "DYNAMIC_TRT_MODEL_CONVERSION": DYNAMIC_TRT_MODEL_CONVERSION,
-    "STATIC_TRT_MODEL_CONVERSION": STATIC_TRT_MODEL_CONVERSION,
+    "SDXL_TENSORRT_CONVERTER": SDXL_TENSORRT_CONVERTER,
 }
