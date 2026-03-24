@@ -2,7 +2,7 @@ from .unet_tensorrt_convert import UNET_TENSORRT_CONVERTER
 from .unet_tensorrt_loader import UNET_TENSORRT_LOADER
 from .vae_tensorrt_converter import SDXL_VAE_TENSORRT_CONVERTER
 from .vae_tensorrt_loader import SDXL_VAE_TENSORRT_LOADER_DECODER
-from .unet_tensorrt_convert_int8 import UNET_TENSORRT_CONVERTER_INT8
+from .unet_tensorrt_converter_int8 import UNET_TENSORRT_CONVERTER_INT8
 
 NODE_CLASS_MAPPINGS = { 
     "UNET_TENSORRT_CONVERTER": UNET_TENSORRT_CONVERTER, 
