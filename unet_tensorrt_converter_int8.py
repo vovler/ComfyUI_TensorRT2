@@ -4,6 +4,7 @@ import time
 import tensorrt as trt
 import folder_paths
 import comfy.model_management
+import modelopt.torch.quantization as mtq # <--- ADDED: Import ModelOpt
 from .trt_common import logger, TQDMProgressMonitor
 
 class UNET_TENSORRT_CONVERTER_INT8:
@@ -40,7 +41,7 @@ class UNET_TENSORRT_CONVERTER_INT8:
         return {
             "required": {
                 "model": ("MODEL",),
-                "filename_prefix": ("STRING", {"default": "ComfyUI_SDXL"}),
+                "filename_prefix": ("STRING", {"default": "ComfyUI_SDXL_INT8"}),
                 "batch_size_min": ("INT", {"default": 1, "min": 1, "max": 100, "step": 1}),
                 "batch_size_opt": ("INT", {"default": 1, "min": 1, "max": 100, "step": 1}),
                 "batch_size_max": ("INT", {"default": 1, "min": 1, "max": 100, "step": 1}),
@@ -146,16 +147,22 @@ class UNET_TENSORRT_CONVERTER_INT8:
             return ()
 
         os.makedirs(os.path.dirname(output_onnx), exist_ok=True)
-        torch.onnx.export(
-            unet_wrapped,
-            inputs,
-            output_onnx,
-            verbose=False,
-            input_names=input_names,
-            output_names=output_names,
-            opset_version=17,
-            dynamic_axes=dynamic_axes,
-        )
+        
+        # --- MODIFIED EXPORT BLOCK ---
+        print("Exporting ONNX with ModelOpt INT8 Q/DQ nodes...")
+        with mtq.export_onnx(): # <--- ADDED: Context manager for INT8
+            torch.onnx.export(
+                unet_wrapped,
+                inputs,
+                output_onnx,
+                verbose=False,
+                input_names=input_names,
+                output_names=output_names,
+                opset_version=17,
+                dynamic_axes=dynamic_axes,
+                do_constant_folding=False, # <--- CHANGED: False prevents the 12GB VRAM OOM
+            )
+        # -----------------------------
 
         comfy.model_management.unload_all_models()
         comfy.model_management.soft_empty_cache()
@@ -182,8 +189,10 @@ class UNET_TENSORRT_CONVERTER_INT8:
         for k in range(len(input_names)):
             profile.set_shape(input_names[k], inputs_shapes_min[k], inputs_shapes_opt[k], inputs_shapes_max[k])
 
-        if dtype == torch.float16:
-            config.set_flag(trt.BuilderFlag.FP16)
+        # Enable both FP16 and INT8 for the engine
+        config.set_flag(trt.BuilderFlag.FP16)
+        config.set_flag(trt.BuilderFlag.INT8) # <--- ADDED: Crucial for INT8 speedup
+
         if dtype == torch.bfloat16:
             config.set_flag(trt.BuilderFlag.BF16)
 
