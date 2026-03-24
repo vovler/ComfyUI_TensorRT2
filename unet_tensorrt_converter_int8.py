@@ -4,7 +4,7 @@ import time
 import tensorrt as trt
 import folder_paths
 import comfy.model_management
-import modelopt.torch.quantization as mtq # <--- ADDED: Import ModelOpt
+from modelopt.torch.quantization.export_onnx import export_onnx
 from .trt_common import logger, TQDMProgressMonitor
 
 class UNET_TENSORRT_CONVERTER_INT8:
@@ -150,7 +150,7 @@ class UNET_TENSORRT_CONVERTER_INT8:
         
         # --- MODIFIED EXPORT BLOCK ---
         print("Exporting ONNX with ModelOpt INT8 Q/DQ nodes...")
-        with mtq.export_onnx(): # <--- ADDED: Context manager for INT8
+        with export_onnx(): # <--- This calls the function directly
             torch.onnx.export(
                 unet_wrapped,
                 inputs,
