@@ -4,7 +4,7 @@ import time
 import tensorrt as trt
 import folder_paths
 import comfy.model_management
-from modelopt.torch.quantization.export_onnx import export_onnx
+import modelopt.torch.export as mte 
 from .trt_common import logger, TQDMProgressMonitor
 
 class UNET_TENSORRT_CONVERTER_INT8:
@@ -150,18 +150,16 @@ class UNET_TENSORRT_CONVERTER_INT8:
         
         # --- MODIFIED EXPORT BLOCK ---
         print("Exporting ONNX with ModelOpt INT8 Q/DQ nodes...")
-        with export_onnx(): # <--- This calls the function directly
-            torch.onnx.export(
-                unet_wrapped,
-                inputs,
-                output_onnx,
-                verbose=False,
-                input_names=input_names,
-                output_names=output_names,
-                opset_version=17,
-                dynamic_axes=dynamic_axes,
-                do_constant_folding=False, # <--- CHANGED: False prevents the 12GB VRAM OOM
-            )
+        mte.export_onnx(
+            unet_wrapped,
+            inputs,
+            output_onnx,
+            input_names=input_names,
+            output_names=output_names,
+            opset_version=17,
+            dynamic_axes=dynamic_axes,
+            do_constant_folding=False, # Keep this False to prevent OOM on your 3060
+        )
         # -----------------------------
 
         comfy.model_management.unload_all_models()
